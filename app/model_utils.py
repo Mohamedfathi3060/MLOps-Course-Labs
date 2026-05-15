@@ -4,21 +4,30 @@ Model loading and prediction logic.
 The model must be loaded ONCE at module level, NOT inside the predict function.
 """
 
-# TODO 1: Load your serialized churn model from data/model.joblib
-model = ...
+import pickle
+
+with open("data/model.pkl", "rb") as f:
+    model = pickle.load(f)
 
 
 def predict_churn(features: list[float]) -> int:
-    """
-    Takes a list of feature values and returns a churn prediction (0 or 1).
-    """
-    # TODO 2: Use model.predict() to get a prediction and return it as an int
-    #         Hint: model.predict() expects a 2D array
-    pass
+    prediction = model.predict([features])
+    return int(prediction[0])
 
 
 if __name__ == "__main__":
-    # TODO 3: Replace with sample features that match your model
-    sample = []
+    sample = [
+        -1.6532555978100791,
+        -0.47907533347697956,
+        -1.3559114022278245,
+        0.9515606038935047,
+        -0.7700253680702854,
+        0.6490271882799827,
+        -0.9370854375453458,
+        1.6307585905747244,
+        0.0,
+        1.0,
+        0.0,
+    ]
     print(f"Input:      {sample}")
     print(f"Prediction: {predict_churn(sample)}")
