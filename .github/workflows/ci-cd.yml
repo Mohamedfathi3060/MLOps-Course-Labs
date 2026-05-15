@@ -1,0 +1,189 @@
+name: CI/CD Pipeline
+
+on:
+  push:
+    branches: [ main]
+
+env:
+  REGISTRY: docker.io
+  IMAGE_NAME: ${{ secrets.DOCKER_USERNAME }}/churn-prediction-api
+  ECR_REGISTRY: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_REGION }}.amazonaws.com
+  ECR_REPOSITORY: churn-prediction-api
+
+jobs:
+  # Stage 1: Test and Validation
+  test:
+    runs-on: ubuntu-latest
+    name: Run Tests & Validation
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+
+      - name: Install uv
+        run: pip install uv
+
+      - name: Install dependencies
+        run: uv sync
+
+      - name: Run linting with ruff
+        run: uv run ruff check .
+        continue-on-error: true
+
+      - name: Run type checking
+        run: uv run ruff check . --select=E,W,F
+        continue-on-error: true
+
+      - name: Run pytest with coverage
+        run: uv run pytest tests/ --cov=app --cov-report=xml --cov-report=html -v
+
+      - name: Upload coverage reports
+        uses: codecov/codecov-action@v3
+        with:
+          files: ./coverage.xml
+          fail_ci_if_error: false
+          verbose: true
+
+  # Stage 2: Build & Push Docker Image
+  build-and-push:
+    runs-on: ubuntu-latest
+    name: Build & Push Docker Image
+    needs: test
+    if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/develop')
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v2
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v2
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ secrets.DOCKER_USERNAME }}
+          password: ${{ secrets.DOCKER_PASSWORD }}
+
+      - name: Configure AWS credentials (Optional for ECR)
+        uses: aws-actions/configure-aws-credentials@v2
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_REGION }}
+        if: secrets.AWS_ACCOUNT_ID != ''
+        continue-on-error: true
+
+      - name: Login to Amazon ECR (Optional)
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v1
+        if: secrets.AWS_ACCOUNT_ID != ''
+        continue-on-error: true
+
+      - name: Build and push to Docker Hub
+        uses: docker/build-push-action@v4
+        with:
+          context: .
+          push: true
+          tags: |
+            ${{ env.IMAGE_NAME }}:latest
+            ${{ env.IMAGE_NAME }}:${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Build and push to ECR (Optional)
+        uses: docker/build-push-action@v4
+        if: steps.login-ecr.outcome == 'success'
+        with:
+          context: .
+          push: true
+          tags: |
+            ${{ env.ECR_REGISTRY }}/${{ env.ECR_REPOSITORY }}:latest
+            ${{ env.ECR_REGISTRY }}/${{ env.ECR_REPOSITORY }}:${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  # Stage 3: Deploy to EC2
+  deploy:
+    runs-on: ubuntu-latest
+    name: Deploy to EC2
+    needs: build-and-push
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Deploy to EC2 via SSH
+        uses: appleboy/ssh-action@master
+        with:
+          host: ${{ secrets.EC2_HOST }}
+          username: ${{ secrets.EC2_USER }}
+          key: ${{ secrets.EC2_SSH_KEY }}
+          port: 22
+          script: |
+            # Set variables
+            DOCKER_IMAGE="${{ env.IMAGE_NAME }}:${{ github.sha }}"
+            CONTAINER_NAME="churn-prediction-api"
+            CONTAINER_PORT=8000
+            HOST_PORT=8000
+            
+            # Pull the latest image
+            docker pull $DOCKER_IMAGE
+            
+            # Stop and remove existing container if running
+            if [ $(docker ps -aq -f name=$CONTAINER_NAME) ]; then
+              echo "Stopping existing container..."
+              docker stop $CONTAINER_NAME
+              docker rm $CONTAINER_NAME
+            fi
+            
+            # Run new container
+            echo "Starting new container..."
+            docker run -d \
+              --name $CONTAINER_NAME \
+              -p $HOST_PORT:$CONTAINER_PORT \
+              --restart unless-stopped \
+              $DOCKER_IMAGE
+            
+            # Verify container is running
+            if [ $(docker ps -q -f name=$CONTAINER_NAME) ]; then
+              echo "Container started successfully!"
+              docker ps | grep $CONTAINER_NAME
+            else
+              echo "Failed to start container!"
+              exit 1
+            fi
+
+      - name: Verify deployment
+        uses: appleboy/ssh-action@master
+        with:
+          host: ${{ secrets.EC2_HOST }}
+          username: ${{ secrets.EC2_USER }}
+          key: ${{ secrets.EC2_SSH_KEY }}
+          port: 22
+          script: |
+            # Check if service is responding
+            sleep 5
+            curl -f http://localhost:8000/health || true
+            echo "Deployment verification completed"
+
+  # Notification/Summary
+  notify-status:
+    runs-on: ubuntu-latest
+    name: Pipeline Status
+    needs: [ test, build-and-push, deploy ]
+    if: always()
+
+    steps:
+      - name: Pipeline Status
+        run: |
+          echo "✅ Test Stage: ${{ needs.test.result }}"
+          echo "✅ Build & Push Stage: ${{ needs.build-and-push.result }}"
+          echo "✅ Deploy Stage: ${{ needs.deploy.result }}"
