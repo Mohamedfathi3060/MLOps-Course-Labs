@@ -33,7 +33,7 @@ class ChurnRequest(BaseModel):
 @get("/")
 async def index() -> str:
     logger.info("home endpoint was accessed")
-    return "Hello, world!"
+    return "Hello, world!, mohamed Fathi"
 
 
 @get("/health")
