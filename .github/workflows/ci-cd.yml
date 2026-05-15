@@ -108,6 +108,20 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
+      - name: Configure AWS credentials for ECR
+        uses: aws-actions/configure-aws-credentials@v2
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      - name: Get ECR login password
+        id: get-ecr-password
+        run: |
+          ECR_PASSWORD=$(aws ecr get-login-password --region ${{ secrets.AWS_REGION }})
+          echo "ECR_PASSWORD=$ECR_PASSWORD" >> $GITHUB_OUTPUT
+          echo "::add-mask::$ECR_PASSWORD"
+
       - name: Deploy to EC2 via SSH
         uses: appleboy/ssh-action@master
         with:
@@ -118,9 +132,13 @@ jobs:
           script: |
             # Set variables
             DOCKER_IMAGE="${{ env.IMAGE_NAME }}:${{ github.sha }}"
+            ECR_PASSWORD="${{ steps.get-ecr-password.outputs.ECR_PASSWORD }}"
             CONTAINER_NAME="churn-prediction-api"
             CONTAINER_PORT=8000
             HOST_PORT=80
+            
+            # Login to ECR
+            printf '%s' "$ECR_PASSWORD" | docker login --username AWS --password-stdin ${{ env.ECR_REGISTRY }}
             
             # Pull the latest image
             docker pull $DOCKER_IMAGE
